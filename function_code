@@ -1,0 +1,143 @@
+ltv_prediction_error = function(hours, cobrand, model_name, days_remaining, day24) {
+  for (r in 1:nrow(hours)) {
+
+    #---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    # Select data according to what day and time they downloaded
+    cobrand = as.data.frame(cobrand)
+    hour = cobrand[cobrand$dl_hour==hours[r,"w_start"],]
+    hour = hour[complete.cases(hour$clicks),]
+    last_val = (24*days_remaining)-1
+    time = hour[hour$period_hour <= last_val,]
+    sequence = seq(0,last_val)
+    files = data.frame("period_hour" = sequence, "clicks" = NA)
+    if (sum(time$clicks) == 0) {
+      next
+    }
+    
+    #---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    # Aggregate clicks by hour from download
+    
+    breakdown = ddply(time, c("period_hour"), summarize,
+                      clicks  = sum(clicks)
+    )
+    breakdown = merge(files, breakdown, by = "period_hour", na.fill = TRUE, all.x = TRUE)
+    breakdown$clicks.x = NULL
+    breakdown$clicks.y = ifelse(is.na(breakdown$clicks.y), 0, breakdown$clicks.y)
+    breakdown$clicks = breakdown$clicks.y
+    breakdown$clicks.y = NULL
+    breakdown$cumsum = 0
+    
+    #---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    # Make the clicks cumulative by hour from download
+    
+    breakdown[1,"cumsum"] = breakdown[1,"clicks"]
+    for (i in 2:nrow(breakdown)) {
+      breakdown[i,"cumsum"] = breakdown[i,"clicks"] + breakdown[i-1,"cumsum"]
+    }
+    
+    breakdown = na.omit(breakdown)
+    breakdown$tempt = c(1:nrow(breakdown))
+    #---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    # Build table with powers ^ 0.01 through 1.00
+    
+    power_table2 = matrix(data = NA, nrow = 100, ncol = (24*days_remaining))
+    power_table2[1,] = 0.01
+    power_table2[2,] = 0.02
+    
+    for (i in 3:nrow(power_table2)) {
+      power_table2[i,] = power_table2[i-1,] + (power_table2[i-1,] - power_table2[i-2,])
+    }
+    
+    rownames(power_table2) = col_name$colname
+    power_table2 = t(power_table2)
+    
+    for (i in 1:nrow(power_table2)) {
+      power_table2[i,] = i^(power_table2[i,])
+    }
+    
+    newbreakdown = cbind(breakdown, power_table2)
+    
+    prediction_table = matrix(data = NA, nrow = (24*days_remaining), ncol = 102)
+    prediction_table = as.data.frame(prediction_table)
+    prediction_table[,1] = r
+    prediction_table[,2] = newbreakdown$cumsum
+    
+    prediction_table2 = matrix(data = NA, nrow = 1, ncol = 101)
+    prediction_table2 = as.data.frame(prediction_table2)
+    prediction_table2[,1] = r
+    prediction_table3 = prediction_table2
+    
+    #---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    # Take first 24 hours of cumulative clicks
+    
+    # Fit model ----------- (cumulative clicks ~ power ^ )
+    
+    # Identify betas 0 and 1
+    
+    for (w in 5:ncol(newbreakdown)) {
+      newbreakdown$power = newbreakdown[,w]
+      small = newbreakdown[1:model_name,]
+      templm = lm(formula = 'cumsum ~ power', data = small)
+      newbreakdown$predict = predict(templm, newdata=newbreakdown)
+      beta_0 = coef(summary(templm))[1,1]
+      beta_1 = coef(summary(templm))[1,2]
+      prediction_table[,(w-2)] = newbreakdown$predict
+      prediction_table2[,(w-3)] = beta_0
+      prediction_table3[,(w-3)] = beta_1
+      error_value = (newbreakdown$predict[(24*days_remaining)] - newbreakdown$cumsum[(24*days_remaining)])/newbreakdown$cumsum[(24*days_remaining)]
+      error[w-4,r] = error_value
+    }
+
+    large_file2[r,] = prediction_table2
+    large_file3[r,] = prediction_table3
+    
+    starting = ((24*days_remaining)*r)-((24*days_remaining)-1)
+    ending = ((24*days_remaining)*r)
+    large_file[starting:ending,] = prediction_table[1:(24*days_remaining),]
+    
+    #---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    # Store all 100 hourly predictions for each given hour
+    
+    file_name = paste("/nfs/ETL/temp/Paden.Kosoff/ltv_30_2w_pred/pred_2w_",day24,model_name,"___",prid,start/100,".csv")
+    file_name = gsub(" ","", file_name)
+    write.csv(x = large_file, file = file_name)
+    print(paste("hour ",start+r))
+  }
+  
+  #---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  # Measure error rate for the 100 hourly predictions for the given hour
+  
+  error = ifelse(is.na(error),0, error)
+  abs_error = abs(error)
+  abs_error = na.omit(abs_error)
+  min_error = matrix(data = NA, ncol = 4, nrow = 24)
+  min_error = as.data.frame(min_error)
+  colnames(min_error) = c("power","error_value","prid","day")
+  min_error$prid = prid
+  min_error$day = start/100
+  
+  #---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  # Determine which power gave the smallest error for each hour
+  
+  # Store the error rate for the 24 hours of that given day
+  
+  for (t in 1:nrow(min_error)) {
+    min_error[t,"power"] = min((which(abs_error[,t] == min(abs_error[,t]))/100))
+    min_error[t,"error_value"] = min(abs_error[,t])
+  }
+  
+  file_name2 = paste("/nfs/ETL/temp/Paden.Kosoff/ltv_30_2w_min/min_2w_",day24,model_name,"___",prid,start/100,".csv")
+  file_name2 = gsub(" ","", file_name2)
+  write.csv(x = min_error, file = file_name2)
+  
+  file_name3 = paste("/nfs/ETL/temp/Paden.Kosoff/ltv_30_2w_beta_0/beta_0___",model_name,"___",prid,"__",start/100,".csv")
+  file_name3 = gsub(" ","", file_name3)
+  write.csv(x = large_file2, file = file_name3)
+  
+  file_name4 = paste("/nfs/ETL/temp/Paden.Kosoff/ltv_30_2w_beta_1/beta_1___",model_name,"___",prid,"__",start/100,".csv")
+  file_name4 = gsub(" ","", file_name4)
+  write.csv(x = large_file3, file = file_name4)
+  
+  print(paste("end of day ",hours[1,2]/100))
+  
+}
